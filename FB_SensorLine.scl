@@ -1,0 +1,91 @@
+﻿FUNCTION_BLOCK "FB_SensorLine"
+TITLE = Line with Sensors
+{ S7_Optimized_Access := 'FALSE' }
+AUTHOR : MBelsky
+VERSION : 0.1
+//Function block for linear length measurement with several (maximum 16) discrete sensors
+   VAR_INPUT 
+      i_iAddress : Int;   // Стартовый адрес байта входов первого датчика
+      i_iBaseOffset : Int;   // Отступ от реперного борта до первого датчика 1.8 метра
+      i_iDistance : Int;   // Интервал между датчиками  300 мм
+      i_iSensorQnty : Int;   // Кол-во сенсоров в линейке, максимум 16
+   END_VAR
+
+   VAR_OUTPUT 
+      o_iLength : Int;   // Измеренная длина
+      o_xDone : Bool;   // Измерение проведено
+   END_VAR
+
+   VAR 
+      s_iLenght : Int;
+      s_iLenghtMax : Int;   // максимально считанное значение
+      s_xTrig : Int;
+   END_VAR
+
+   VAR_TEMP 
+      t_diSensorQntyMask : DInt;   // Маска для считывания именно датчиков, а не левой всякой шняги
+      t_iLength : Int;   // Длинна временная
+      t_iSensors : Int;   // Значение слова с датчиков
+      t_iDistanceSummary : Int;   // Результируящая дистанция пересечения всех датчиков
+      t_rLog2Sensors : Real;   // Двоичный логорифм от слова датчиков
+      t_iLog2SensorsTrunc : Int;   // Округленный двоичный логорифм
+      Source : Struct
+         S7Code : Byte;
+         DataType : Byte;
+         Length : Int;
+         DBNumber : Int;
+         BytePointer : DWord;
+      END_STRUCT;
+      Destenation : Struct
+         S7Code : Byte;
+         DataType : Byte;
+         Lengtht : Int;
+         DBNumber : Int;
+         Byte_Pointer : DWord;
+      END_STRUCT;
+      retVal : Int;
+   END_VAR
+
+
+BEGIN
+	//  Дебильная формула, потому что в трех(четырех)сотке нет возведения в степень.
+	//  берем число 1, сдвигаем налево столько раз, сколько сенсоров и еще один разряд. Затем от результата отнимаем единицу.
+	//  Получается двоичная маска 0000000000000001 -> 0000000100000000 -> 0000000111111111
+	#t_diSensorQntyMask := SHL(IN := 16#1, N := (#i_iSensorQnty)) ;
+	#t_diSensorQntyMask := #t_diSensorQntyMask - 1;
+	
+	//  Чтенте области данных образа процесса (входов) через межзонный указатель
+	#Source.S7Code := 16#10;                    // HEX for the syntax ID
+	#Source.DataType := 16#2;                   // Assign values for source pointer (for the data type BYTE)
+	#Source.Length := 2;                        // Lenght 2 bytes
+	#Source.DBNumber := 0;                      // Byte and bit address of the data block
+	#Source.BytePointer := SHL(IN:=INT_TO_DWORD(#i_iAddress), N:=3) OR dw#16#81000000;      // (Zero POINTER on input Ix.0 (over several areas))
+	
+	#retVal := BLKMOV(SRCBLK := #Source, DSTBLK => #t_iSensors);
+	
+	// счианне значение умножаем на маску с приведением типов до WORD
+	#t_iSensors := INT_TO_WORD(#t_iSensors) AND DINT_TO_WORD(#t_diSensorQntyMask);
+	
+	// при непересеченном ни одном датчикеб значения расчетных переменных обнуляются, 
+	// и расчет дальше не ведется.
+	IF #t_iSensors = 0 THEN
+	    #s_iLenght := #s_iLenghtMax := 0;
+	    RETURN;
+	END_IF;
+	
+	
+	//  Старший бит числа, представленного в двоичной форме - есть логорифм этого числа по основанию 2.
+	//  Чтобы получисть Log2, воспользуемся формулой привеления, тк симатик умеет брать только натуральный логорифм.
+	//  Log2(X) = LN(X)/LN(2)
+	#t_rLog2Sensors :=REAL_TO_INT( ( LN(INT_TO_REAL (#t_iSensors)) / LN (2.0) ));                       //  полный результат по формуле
+	#t_iLog2SensorsTrunc := TRUNC_INT(#t_rLog2Sensors);                                                 //  округленный
+	#t_iLog2SensorsTrunc := TRUNC_INT(REAL_TO_INT( ( LN(INT_TO_REAL (#t_iSensors)) / LN (2.0) )));      //  полная формула логорифма
+	#t_iDistanceSummary := #t_iLog2SensorsTrunc * #i_iDistance;                                         //  Расчет сумарного расстояния, перекрытых датчиков
+	#s_iLenght := #t_iDistanceSummary + #i_iBaseOffset;                                                 //  Длина = перекрытые датчики + расстояние от борта до первого
+	
+	//  если доска сходит с линейки наискосок, то сохраняется максимальное значение
+	IF #s_iLenght >= #s_iLenghtMax AND #t_iSensors <> 0 THEN
+	    #s_iLenghtMax := #o_iLength := #s_iLenght ;
+	END_IF;
+END_FUNCTION_BLOCK
+
